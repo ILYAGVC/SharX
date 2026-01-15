@@ -1,6 +1,15 @@
-# 3X-UI New
+<div align="center">
+
+<!-- Liquid Glass Hero Section -->
+<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=0,2,3,5,30&height=300&section=header&text=3X-UI%20NEW&fontSize=70&fontAlignY=40&animation=fadeIn&fontColor=gradient&desc=Next%20Generation%20Panel%20%7C%20Multi-Node%20Management&descSize=25&descAlignY=60" width="100%"/>
+
+</div>
+
+<div align="center">
 
 [English](README_EN.md) | [Русский](README_RU.md)
+
+</div>
 
 ## Welcome to the New 3x-ui / Добро пожаловать в новую 3x-ui
 
