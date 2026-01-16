@@ -358,7 +358,8 @@ setup_ip_certificate() {
         ${domain_args} \
         --standalone \
         --server letsencrypt \
-        --valid-to "+6d" \
+        --certificate-profile shortlived \
+        --days 6 \
         --httpport ${WebPort} \
         --force
 
@@ -858,10 +859,9 @@ change_db_password() {
     sed -i "s/XUI_DB_PASSWORD: .*/XUI_DB_PASSWORD: $new_password/" "$INSTALL_DIR/$COMPOSE_FILE"
     sed -i "s/POSTGRES_PASSWORD: .*/POSTGRES_PASSWORD: $new_password/" "$INSTALL_DIR/$COMPOSE_FILE"
     
-    # Stop services and remove volume
+    # Stop services and remove volume (only this project's volume)
     cd "$INSTALL_DIR"
-    docker compose down
-    docker volume rm 3x-ui-new_postgres_data 2>/dev/null || docker volume rm $(docker volume ls -q | grep postgres_data) 2>/dev/null || true
+    docker compose down -v
     
     DB_PASSWORD=$new_password
     save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP"
