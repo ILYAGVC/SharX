@@ -63,23 +63,144 @@ check_root() {
     fi
 }
 
+# Detect OS and package manager
+detect_os() {
+    OS=""
+    PACKAGE_MANAGER=""
+    
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS=$ID
+    elif [[ -f /etc/redhat-release ]]; then
+        OS="centos"
+    elif [[ -f /etc/arch-release ]]; then
+        OS="arch"
+    elif [[ -f /etc/alpine-release ]]; then
+        OS="alpine"
+    fi
+    
+    # Detect package manager
+    if command -v apt-get &> /dev/null; then
+        PACKAGE_MANAGER="apt"
+    elif command -v dnf &> /dev/null; then
+        PACKAGE_MANAGER="dnf"
+    elif command -v yum &> /dev/null; then
+        PACKAGE_MANAGER="yum"
+    elif command -v pacman &> /dev/null; then
+        PACKAGE_MANAGER="pacman"
+    elif command -v apk &> /dev/null; then
+        PACKAGE_MANAGER="apk"
+    elif command -v zypper &> /dev/null; then
+        PACKAGE_MANAGER="zypper"
+    fi
+    
+    echo -e "  OS: ${CYAN}$OS${NC}"
+    echo -e "  Package Manager: ${CYAN}$PACKAGE_MANAGER${NC}"
+}
+
 # Check system requirements
 check_system() {
     print_info "Checking system requirements..."
     
-    # Check if Ubuntu
-    if ! grep -qi "ubuntu" /etc/os-release 2>/dev/null; then
-        print_warning "This script is designed for Ubuntu. Proceed with caution on other systems."
+    # Detect OS
+    detect_os
+    
+    if [[ -z "$PACKAGE_MANAGER" ]]; then
+        print_error "Could not detect package manager!"
+        exit 1
     fi
     
     # Check architecture
     ARCH=$(uname -m)
-    if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
+    if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" && "$ARCH" != "armv7l" ]]; then
         print_error "Unsupported architecture: $ARCH"
         exit 1
     fi
+    echo -e "  Architecture: ${CYAN}$ARCH${NC}"
     
     print_success "System check passed!"
+}
+
+# Install Docker - Debian/Ubuntu
+install_docker_apt() {
+    # Remove old versions
+    apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    
+    # Update and install prerequisites
+    apt-get update -y
+    apt-get install -y ca-certificates curl gnupg
+    
+    # Add Docker's official GPG key
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/$OS/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null || true
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    
+    # Set up repository
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS \
+      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
+    # Install Docker
+    apt-get update -y
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+# Install Docker - Fedora
+install_docker_dnf() {
+    # Remove old versions
+    dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
+    
+    # Install prerequisites
+    dnf install -y dnf-plugins-core
+    
+    # Add Docker repository
+    dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+    
+    # Install Docker
+    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+# Install Docker - CentOS/RHEL
+install_docker_yum() {
+    # Remove old versions
+    yum remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
+    
+    # Install prerequisites
+    yum install -y yum-utils
+    
+    # Add Docker repository
+    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    
+    # Install Docker
+    yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+}
+
+# Install Docker - Arch Linux
+install_docker_pacman() {
+    # Update system
+    pacman -Syu --noconfirm
+    
+    # Install Docker
+    pacman -S --noconfirm docker docker-compose
+}
+
+# Install Docker - Alpine
+install_docker_apk() {
+    # Update repositories
+    apk update
+    
+    # Install Docker
+    apk add docker docker-cli-compose
+    
+    # Add to boot
+    rc-update add docker boot
+}
+
+# Install Docker - openSUSE
+install_docker_zypper() {
+    # Install Docker
+    zypper install -y docker docker-compose
 }
 
 # Install Docker if not present
@@ -89,42 +210,51 @@ install_docker() {
         return 0
     fi
 
-    print_info "Installing Docker..."
+    print_info "Installing Docker for $OS using $PACKAGE_MANAGER..."
     
-    # Remove old versions
-    apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
-    
-    # Update package index
-    apt-get update -y
-    
-    # Install prerequisites
-    apt-get install -y \
-        apt-transport-https \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release
-    
-    # Add Docker's official GPG key
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    
-    # Set up repository
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-      tee /etc/apt/sources.list.d/docker.list > /dev/null
-    
-    # Install Docker
-    apt-get update -y
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    case $PACKAGE_MANAGER in
+        apt)
+            install_docker_apt
+            ;;
+        dnf)
+            install_docker_dnf
+            ;;
+        yum)
+            install_docker_yum
+            ;;
+        pacman)
+            install_docker_pacman
+            ;;
+        apk)
+            install_docker_apk
+            ;;
+        zypper)
+            install_docker_zypper
+            ;;
+        *)
+            print_error "Unsupported package manager: $PACKAGE_MANAGER"
+            print_info "Please install Docker manually: https://docs.docker.com/engine/install/"
+            exit 1
+            ;;
+    esac
     
     # Start and enable Docker
-    systemctl start docker
-    systemctl enable docker
+    if command -v systemctl &> /dev/null; then
+        systemctl start docker
+        systemctl enable docker
+    elif command -v rc-service &> /dev/null; then
+        rc-service docker start
+    elif command -v service &> /dev/null; then
+        service docker start
+    fi
     
-    print_success "Docker installed successfully!"
+    # Verify installation
+    if command -v docker &> /dev/null; then
+        print_success "Docker installed successfully!"
+    else
+        print_error "Docker installation failed!"
+        exit 1
+    fi
 }
 
 # Install Docker Compose (standalone) if not present
@@ -135,12 +265,62 @@ install_docker_compose() {
         return 0
     fi
     
-    # Install as plugin if missing
-    print_info "Installing Docker Compose plugin..."
-    apt-get update -y
-    apt-get install -y docker-compose-plugin
+    # Check for standalone docker-compose
+    if command -v docker-compose &> /dev/null; then
+        print_success "Docker Compose standalone is available: $(docker-compose --version)"
+        # Create alias function for compatibility
+        docker() {
+            if [[ "$1" == "compose" ]]; then
+                shift
+                command docker-compose "$@"
+            else
+                command docker "$@"
+            fi
+        }
+        return 0
+    fi
     
-    print_success "Docker Compose installed successfully!"
+    print_info "Installing Docker Compose..."
+    
+    case $PACKAGE_MANAGER in
+        apt)
+            apt-get update -y
+            apt-get install -y docker-compose-plugin || apt-get install -y docker-compose
+            ;;
+        dnf)
+            dnf install -y docker-compose-plugin || dnf install -y docker-compose
+            ;;
+        yum)
+            yum install -y docker-compose-plugin || yum install -y docker-compose
+            ;;
+        pacman)
+            # Already installed with docker
+            pacman -S --noconfirm docker-compose 2>/dev/null || true
+            ;;
+        apk)
+            # Already installed as docker-cli-compose
+            apk add docker-cli-compose 2>/dev/null || apk add docker-compose
+            ;;
+        zypper)
+            zypper install -y docker-compose-plugin || zypper install -y docker-compose
+            ;;
+        *)
+            # Try to install standalone docker-compose
+            print_info "Installing Docker Compose standalone..."
+            COMPOSE_VERSION=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | grep 'tag_name' | cut -d\" -f4)
+            curl -L "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            chmod +x /usr/local/bin/docker-compose
+            ;;
+    esac
+    
+    # Verify installation
+    if docker compose version &> /dev/null || docker-compose --version &> /dev/null; then
+        print_success "Docker Compose installed successfully!"
+    else
+        print_error "Docker Compose installation failed!"
+        print_info "Please install manually: https://docs.docker.com/compose/install/"
+        exit 1
+    fi
 }
 
 # Generate random string
@@ -211,9 +391,28 @@ install_acme() {
     print_info "Installing acme.sh for SSL certificate management..."
     cd ~ || return 1
     
-    # Install dependencies
-    apt-get update -y
-    apt-get install -y curl socat cron
+    # Install dependencies based on package manager
+    case $PACKAGE_MANAGER in
+        apt)
+            apt-get update -y
+            apt-get install -y curl socat cron
+            ;;
+        dnf)
+            dnf install -y curl socat cronie
+            ;;
+        yum)
+            yum install -y curl socat cronie
+            ;;
+        pacman)
+            pacman -S --noconfirm curl socat cronie
+            ;;
+        apk)
+            apk add curl socat
+            ;;
+        zypper)
+            zypper install -y curl socat cron
+            ;;
+    esac
     
     curl -s https://get.acme.sh | sh >/dev/null 2>&1
     if [ $? -ne 0 ]; then
@@ -224,8 +423,13 @@ install_acme() {
     fi
     
     # Enable cron for auto-renewal
-    systemctl enable cron 2>/dev/null || true
-    systemctl start cron 2>/dev/null || true
+    if command -v systemctl &> /dev/null; then
+        systemctl enable cron 2>/dev/null || systemctl enable crond 2>/dev/null || systemctl enable cronie 2>/dev/null || true
+        systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || systemctl start cronie 2>/dev/null || true
+    elif command -v rc-update &> /dev/null; then
+        rc-update add crond default 2>/dev/null || true
+        rc-service crond start 2>/dev/null || true
+    fi
     
     return 0
 }
