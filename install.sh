@@ -380,10 +380,71 @@ is_domain() {
 # Check if port is in use
 is_port_in_use() {
     local port="$1"
-    if ss -tuln | grep -q ":${port} "; then
+    
+    # Try different methods to check port
+    if command -v ss &> /dev/null; then
+        if ss -tuln 2>/dev/null | grep -q ":${port} "; then
+            return 0
+        fi
+    elif command -v netstat &> /dev/null; then
+        if netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+            return 0
+        fi
+    elif command -v lsof &> /dev/null; then
+        if lsof -i :${port} 2>/dev/null | grep -q LISTEN; then
+            return 0
+        fi
+    fi
+    
+    # Check Docker containers
+    if docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port}->"; then
         return 0
     fi
+    
     return 1
+}
+
+# Validate and check port availability
+validate_port() {
+    local port="$1"
+    local service_name="${2:-service}"
+    
+    # Check if port is a valid number
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        print_error "Invalid port number: $port (must be 1-65535)"
+        return 1
+    fi
+    
+    # Check if port is in use
+    if is_port_in_use "$port"; then
+        print_error "Port $port is already in use!"
+        print_info "Please choose a different port or free this port first."
+        return 1
+    fi
+    
+    return 0
+}
+
+# Prompt for port with validation
+prompt_port() {
+    local default_port="$1"
+    local service_name="${2:-service}"
+    local port
+    
+    while true; do
+        read -p "Enter $service_name port [$default_port]: " port
+        port=${port:-$default_port}
+        
+        if validate_port "$port" "$service_name"; then
+            echo "$port"
+            return 0
+        fi
+        
+        read -p "Try again? [y/N]: " retry
+        if [[ "$retry" != "y" && "$retry" != "Y" ]]; then
+            return 1
+        fi
+    done
 }
 
 # Install acme.sh for SSL certificate management
@@ -770,6 +831,17 @@ create_compose_bridge() {
     local panel_port="$1"
     local sub_port="$2"
     local db_password="$3"
+    shift 3
+    local additional_ports=("$@")
+    
+    # Build ports section
+    local ports_section="      - \"$panel_port:2053\"   # Web UI\n      - \"$sub_port:2096\"     # Subscriptions"
+    
+    for port in "${additional_ports[@]}"; do
+        if [[ -n "$port" ]]; then
+            ports_section="${ports_section}\n      - \"$port:$port\"   # Additional port"
+        fi
+    done
     
     cat > "$INSTALL_DIR/$COMPOSE_FILE" << EOF
 services:
@@ -777,11 +849,7 @@ services:
     image: registry.konstpic.ru/3x-ui/3xui:3.0.0b
     container_name: 3xui_app
     ports:
-      - "$panel_port:2053"   # Web UI
-      - "$sub_port:2096"     # Subscriptions
-      # Add more inbound ports as needed:
-      # - "443:443"
-      # - "8443:8443"
+$(echo -e "$ports_section")
     volumes:
       - \$PWD/cert/:/app/cert/
     environment:
@@ -865,6 +933,17 @@ EOF
 # Create node docker-compose.yml with bridge network (port mapping)
 create_node_compose_bridge() {
     local node_port="$1"
+    shift
+    local xray_ports=("$@")
+    
+    # Build ports section
+    local ports_section="      - \"$node_port:8080\"  # API port (connect to panel)"
+    
+    for port in "${xray_ports[@]}"; do
+        if [[ -n "$port" ]]; then
+            ports_section="${ports_section}\n      - \"$port:$port\"  # Xray inbound port"
+        fi
+    done
     
     cat > "$NODE_DIR/$COMPOSE_FILE" << EOF
 services:
@@ -873,10 +952,7 @@ services:
     container_name: 3x-ui-node
     restart: unless-stopped
     ports:
-      - "$node_port:8080"  # API port (connect to panel)
-      # Add inbound ports as needed:
-      # - "443:443"
-      # - "8443:8443"
+$(echo -e "$ports_section")
     volumes:
       - \$PWD/bin/config.json:/app/bin/config.json
       - \$PWD/bin/node-config.json:/app/bin/node-config.json
@@ -902,6 +978,8 @@ save_node_config() {
     local network_mode="$2"
     local cert_type="$3"
     local domain_or_ip="$4"
+    shift 4
+    local xray_ports=("$@")
     
     cat > "$NODE_DIR/.node-config" << EOF
 # 3X-UI Node Configuration
@@ -912,6 +990,7 @@ NETWORK_MODE=$network_mode
 CERT_TYPE=$cert_type
 DOMAIN_OR_IP=$domain_or_ip
 NODE_DIR=$NODE_DIR
+XRAY_PORTS=($(IFS=' '; echo "${xray_ports[*]}"))
 EOF
     
     chmod 600 "$NODE_DIR/.node-config"
@@ -921,6 +1000,10 @@ EOF
 load_node_config() {
     if [[ -f "$NODE_DIR/.node-config" ]]; then
         source "$NODE_DIR/.node-config"
+        # Initialize XRAY_PORTS if not set
+        if [[ -z "${XRAY_PORTS[@]}" ]]; then
+            XRAY_PORTS=()
+        fi
         return 0
     fi
     return 1
@@ -1039,15 +1122,44 @@ install_node_wizard() {
     
     # Step 3: Port configuration (only for bridge mode)
     local node_port=$DEFAULT_NODE_PORT
+    local xray_ports=()
+    
     if [[ "$network_mode" == "bridge" ]]; then
         echo ""
         echo -e "${PURPLE}[Step 3/4]${NC} Port Configuration"
-        read -p "Node API port [$DEFAULT_NODE_PORT]: " node_port
-        node_port=${node_port:-$DEFAULT_NODE_PORT}
         
-        if ! [[ "$node_port" =~ ^[0-9]+$ ]] || [ "$node_port" -lt 1 ] || [ "$node_port" -gt 65535 ]; then
-            print_error "Invalid port!"
+        # Validate and get API port
+        node_port=$(prompt_port "$DEFAULT_NODE_PORT" "Node API")
+        if [[ $? -ne 0 ]]; then
+            print_error "Port configuration failed"
             exit 1
+        fi
+        
+        # Ask for Xray ports
+        echo ""
+        echo -e "${CYAN}Add Xray inbound ports?${NC}"
+        echo -e "${YELLOW}These ports will be used for Xray traffic (e.g., 443, 8443, 2053)${NC}"
+        read -p "Add Xray ports? [y/N]: " add_xray
+        
+        if [[ "$add_xray" == "y" || "$add_xray" == "Y" ]]; then
+            while true; do
+                echo ""
+                read -p "Enter Xray port (or 'done' to finish): " xray_port
+                
+                if [[ "$xray_port" == "done" || "$xray_port" == "" ]]; then
+                    break
+                fi
+                
+                if validate_port "$xray_port" "Xray"; then
+                    xray_ports+=("$xray_port")
+                    echo -e "${GREEN}Port $xray_port added${NC}"
+                else
+                    read -p "Skip this port? [y/N]: " skip
+                    if [[ "$skip" != "y" && "$skip" != "Y" ]]; then
+                        continue
+                    fi
+                fi
+            done
         fi
     else
         echo ""
@@ -1191,11 +1303,11 @@ NODECONFIG
     if [[ "$network_mode" == "host" ]]; then
         create_node_compose_host "$node_port"
     else
-        create_node_compose_bridge "$node_port"
+        create_node_compose_bridge "$node_port" "${xray_ports[@]}"
     fi
     
     # Save configuration
-    save_node_config "$node_port" "$network_mode" "$cert_type" "$domain_or_ip"
+    save_node_config "$node_port" "$network_mode" "$cert_type" "$domain_or_ip" "${xray_ports[@]}"
     
     # Start services
     start_node_services
@@ -1280,6 +1392,144 @@ renew_node_certificate() {
     docker compose up -d
 }
 
+# Reset node (clear node-config.json)
+reset_node() {
+    if ! load_node_config; then
+        print_error "Node configuration not found. Please install node first."
+        return 1
+    fi
+    
+    echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║                  WARNING: RESET NODE                          ║${NC}"
+    echo -e "${RED}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "This will:"
+    echo "  - Clear node-config.json (reset node to default state)"
+    echo "  - Node will need to be re-registered with panel"
+    echo ""
+    read -p "Are you sure? [y/N]: " confirm
+    
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        return 0
+    fi
+    
+    print_info "Resetting node..."
+    
+    # Clear node-config.json
+    echo '{}' > "$NODE_DIR/bin/node-config.json"
+    
+    # Restart node
+    cd "$NODE_DIR"
+    docker compose restart node
+    
+    print_success "Node reset successfully! Node needs to be re-registered with panel."
+}
+
+# Add port to node
+add_node_port() {
+    if ! load_node_config; then
+        print_error "Node configuration not found. Please install node first."
+        return 1
+    fi
+    
+    if [[ "$NETWORK_MODE" != "bridge" ]]; then
+        print_error "Port management is only available in bridge network mode!"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Add Xray port to node${NC}"
+    
+    local new_port=$(prompt_port "" "Xray")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    # Check if port already exists
+    if [[ " ${XRAY_PORTS[@]} " =~ " ${new_port} " ]]; then
+        print_error "Port $new_port is already configured!"
+        return 1
+    fi
+    
+    # Add port to array
+    XRAY_PORTS+=("$new_port")
+    
+    # Recreate compose file
+    if [[ "$NETWORK_MODE" == "bridge" ]]; then
+        create_node_compose_bridge "$NODE_PORT" "${XRAY_PORTS[@]}"
+    fi
+    
+    # Save config
+    save_node_config "$NODE_PORT" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP" "${XRAY_PORTS[@]}"
+    
+    # Restart node
+    cd "$NODE_DIR"
+    docker compose down
+    docker compose up -d
+    
+    print_success "Port $new_port added and node restarted!"
+}
+
+# Remove port from node
+remove_node_port() {
+    if ! load_node_config; then
+        print_error "Node configuration not found. Please install node first."
+        return 1
+    fi
+    
+    if [[ "$NETWORK_MODE" != "bridge" ]]; then
+        print_error "Port management is only available in bridge network mode!"
+        return 1
+    fi
+    
+    if [[ ${#XRAY_PORTS[@]} -eq 0 ]]; then
+        print_error "No Xray ports configured!"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Remove Xray port from node${NC}"
+    echo ""
+    echo "Current Xray ports:"
+    for i in "${!XRAY_PORTS[@]}"; do
+        echo "  $((i+1))) ${XRAY_PORTS[$i]}"
+    done
+    echo ""
+    
+    read -p "Enter port number to remove: " port_to_remove
+    
+    # Find and remove port
+    local new_ports=()
+    local found=0
+    for port in "${XRAY_PORTS[@]}"; do
+        if [[ "$port" != "$port_to_remove" ]]; then
+            new_ports+=("$port")
+        else
+            found=1
+        fi
+    done
+    
+    if [[ $found -eq 0 ]]; then
+        print_error "Port $port_to_remove not found!"
+        return 1
+    fi
+    
+    XRAY_PORTS=("${new_ports[@]}")
+    
+    # Recreate compose file
+    create_node_compose_bridge "$NODE_PORT" "${XRAY_PORTS[@]}"
+    
+    # Save config
+    save_node_config "$NODE_PORT" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP" "${XRAY_PORTS[@]}"
+    
+    # Restart node
+    cd "$NODE_DIR"
+    docker compose down
+    docker compose up -d
+    
+    print_success "Port $port_to_remove removed and node restarted!"
+}
+
 # ============================================
 # END NODE FUNCTIONS
 # ============================================
@@ -1292,6 +1542,8 @@ save_config() {
     local network_mode="$4"
     local cert_type="$5"
     local domain_or_ip="$6"
+    shift 6
+    local additional_ports=("$@")
     
     cat > "$INSTALL_DIR/.3xui-config" << EOF
 # 3X-UI Configuration
@@ -1304,6 +1556,7 @@ NETWORK_MODE=$network_mode
 CERT_TYPE=$cert_type
 DOMAIN_OR_IP=$domain_or_ip
 INSTALL_DIR=$INSTALL_DIR
+ADDITIONAL_PORTS=($(IFS=' '; echo "${additional_ports[*]}"))
 EOF
     
     chmod 600 "$INSTALL_DIR/.3xui-config"
@@ -1313,6 +1566,10 @@ EOF
 load_config() {
     if [[ -f "$INSTALL_DIR/.3xui-config" ]]; then
         source "$INSTALL_DIR/.3xui-config"
+        # Initialize ADDITIONAL_PORTS if not set
+        if [[ -z "${ADDITIONAL_PORTS[@]}" ]]; then
+            ADDITIONAL_PORTS=()
+        fi
         return 0
     fi
     return 1
@@ -1431,22 +1688,33 @@ change_panel_port() {
         return 1
     fi
     
-    read -p "Enter new panel port [$PANEL_PORT]: " new_port
-    new_port=${new_port:-$PANEL_PORT}
-    
-    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
-        print_error "Invalid port number!"
+    local new_port=$(prompt_port "$PANEL_PORT" "Panel")
+    if [[ $? -ne 0 ]]; then
         return 1
     fi
     
     print_info "Changing panel port to $new_port..."
     
-    if [[ "$NETWORK_MODE" == "bridge" ]]; then
-        sed -i "s/\"$PANEL_PORT:2053\"/\"$new_port:2053\"/" "$INSTALL_DIR/$COMPOSE_FILE"
+    PANEL_PORT=$new_port
+    
+    # Recreate compose file
+    if [[ "$NETWORK_MODE" == "host" ]]; then
+        create_compose_host "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD"
+    else
+        # Load additional ports if they exist
+        if [[ -n "${ADDITIONAL_PORTS[@]}" ]]; then
+            create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "${ADDITIONAL_PORTS[@]}"
+        else
+            create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD"
+        fi
     fi
     
-    PANEL_PORT=$new_port
-    save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP"
+    # Save config
+    if [[ -n "${ADDITIONAL_PORTS[@]}" ]]; then
+        save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP" "${ADDITIONAL_PORTS[@]}"
+    else
+        save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP"
+    fi
     
     print_info "Restarting services..."
     cd "$INSTALL_DIR"
@@ -1463,22 +1731,33 @@ change_sub_port() {
         return 1
     fi
     
-    read -p "Enter new subscription port [$SUB_PORT]: " new_port
-    new_port=${new_port:-$SUB_PORT}
-    
-    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
-        print_error "Invalid port number!"
+    local new_port=$(prompt_port "$SUB_PORT" "Subscription")
+    if [[ $? -ne 0 ]]; then
         return 1
     fi
     
     print_info "Changing subscription port to $new_port..."
     
-    if [[ "$NETWORK_MODE" == "bridge" ]]; then
-        sed -i "s/\"$SUB_PORT:2096\"/\"$new_port:2096\"/" "$INSTALL_DIR/$COMPOSE_FILE"
+    SUB_PORT=$new_port
+    
+    # Recreate compose file
+    if [[ "$NETWORK_MODE" == "host" ]]; then
+        create_compose_host "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD"
+    else
+        # Load additional ports if they exist
+        if [[ -n "${ADDITIONAL_PORTS[@]}" ]]; then
+            create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "${ADDITIONAL_PORTS[@]}"
+        else
+            create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD"
+        fi
     fi
     
-    SUB_PORT=$new_port
-    save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP"
+    # Save config
+    if [[ -n "${ADDITIONAL_PORTS[@]}" ]]; then
+        save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP" "${ADDITIONAL_PORTS[@]}"
+    else
+        save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP"
+    fi
     
     print_info "Restarting services..."
     cd "$INSTALL_DIR"
@@ -1634,7 +1913,11 @@ setup_new_certificate() {
     prompt_and_setup_ssl "$cert_dir" "$server_ip"
     
     # Update config with new cert type
-    save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$SSL_HOST"
+    if [[ -n "${ADDITIONAL_PORTS[@]}" ]]; then
+        save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$SSL_HOST" "${ADDITIONAL_PORTS[@]}"
+    else
+        save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$SSL_HOST"
+    fi
     
     # Restart services
     cd "$INSTALL_DIR"
@@ -1710,6 +1993,164 @@ uninstall() {
     echo ""
     echo -e "${YELLOW}Note: Script files and directories are preserved.${NC}"
     echo -e "${YELLOW}You can reinstall anytime by running: bash install.sh${NC}"
+}
+
+# Reset panel to default settings (clear database)
+reset_panel() {
+    if ! load_config; then
+        print_error "Configuration not found. Please run installation first."
+        return 1
+    fi
+    
+    echo -e "${RED}╔═══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${RED}║              WARNING: RESET PANEL TO DEFAULTS                 ║${NC}"
+    echo -e "${RED}╚═══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "This will:"
+    echo "  - Stop all containers"
+    echo "  - Remove Docker volumes (ALL DATA WILL BE LOST)"
+    echo "  - Restart services with fresh database"
+    echo ""
+    read -p "Are you sure? [y/N]: " confirm
+    
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        return 0
+    fi
+    
+    read -p "Type 'RESET' to confirm: " confirm2
+    
+    if [[ "$confirm2" != "RESET" ]]; then
+        print_info "Reset cancelled."
+        return 0
+    fi
+    
+    print_info "Resetting panel to default settings..."
+    
+    cd "$INSTALL_DIR"
+    
+    # Stop and remove volumes
+    docker compose down -v
+    
+    # Recreate compose file
+    if [[ "$NETWORK_MODE" == "host" ]]; then
+        create_compose_host "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD"
+    else
+        # Load additional ports if they exist
+        if [[ -n "${ADDITIONAL_PORTS[@]}" ]]; then
+            create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "${ADDITIONAL_PORTS[@]}"
+        else
+            create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD"
+        fi
+    fi
+    
+    # Start services
+    docker compose up -d
+    
+    print_success "Panel reset to default settings!"
+    echo -e "${YELLOW}All data has been cleared. Please reconfigure the panel.${NC}"
+}
+
+# Add port to panel
+add_panel_port() {
+    if ! load_config; then
+        print_error "Configuration not found. Please run installation first."
+        return 1
+    fi
+    
+    if [[ "$NETWORK_MODE" != "bridge" ]]; then
+        print_error "Port management is only available in bridge network mode!"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Add port to panel${NC}"
+    
+    local new_port=$(prompt_port "" "Panel")
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    # Check if port already exists
+    if [[ " ${ADDITIONAL_PORTS[@]} " =~ " ${new_port} " ]]; then
+        print_error "Port $new_port is already configured!"
+        return 1
+    fi
+    
+    # Add port to array
+    ADDITIONAL_PORTS+=("$new_port")
+    
+    # Recreate compose file
+    create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "${ADDITIONAL_PORTS[@]}"
+    
+    # Save config
+    save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP" "${ADDITIONAL_PORTS[@]}"
+    
+    # Restart services
+    cd "$INSTALL_DIR"
+    docker compose down
+    docker compose up -d
+    
+    print_success "Port $new_port added and panel restarted!"
+}
+
+# Remove port from panel
+remove_panel_port() {
+    if ! load_config; then
+        print_error "Configuration not found. Please run installation first."
+        return 1
+    fi
+    
+    if [[ "$NETWORK_MODE" != "bridge" ]]; then
+        print_error "Port management is only available in bridge network mode!"
+        return 1
+    fi
+    
+    if [[ ${#ADDITIONAL_PORTS[@]} -eq 0 ]]; then
+        print_error "No additional ports configured!"
+        return 1
+    fi
+    
+    echo ""
+    echo -e "${CYAN}Remove port from panel${NC}"
+    echo ""
+    echo "Current additional ports:"
+    for i in "${!ADDITIONAL_PORTS[@]}"; do
+        echo "  $((i+1))) ${ADDITIONAL_PORTS[$i]}"
+    done
+    echo ""
+    
+    read -p "Enter port number to remove: " port_to_remove
+    
+    # Find and remove port
+    local new_ports=()
+    local found=0
+    for port in "${ADDITIONAL_PORTS[@]}"; do
+        if [[ "$port" != "$port_to_remove" ]]; then
+            new_ports+=("$port")
+        else
+            found=1
+        fi
+    done
+    
+    if [[ $found -eq 0 ]]; then
+        print_error "Port $port_to_remove not found!"
+        return 1
+    fi
+    
+    ADDITIONAL_PORTS=("${new_ports[@]}")
+    
+    # Recreate compose file
+    create_compose_bridge "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "${ADDITIONAL_PORTS[@]}"
+    
+    # Save config
+    save_config "$PANEL_PORT" "$SUB_PORT" "$DB_PASSWORD" "$NETWORK_MODE" "$CERT_TYPE" "$DOMAIN_OR_IP" "${ADDITIONAL_PORTS[@]}"
+    
+    # Restart services
+    cd "$INSTALL_DIR"
+    docker compose down
+    docker compose up -d
+    
+    print_success "Port $port_to_remove removed and panel restarted!"
 }
 
 # Full installation wizard
@@ -1831,7 +2272,7 @@ install_wizard() {
         create_compose_bridge "$panel_port" "$sub_port" "$db_password"
     fi
     
-    # Save configuration
+    # Save configuration (no additional ports on initial install)
     save_config "$panel_port" "$sub_port" "$db_password" "$network_mode" "$cert_type" "$domain_or_ip"
     
     # Start services
@@ -1913,6 +2354,9 @@ main_menu() {
         echo -e "  ${YELLOW}10)${NC} Change Database Password"
         echo -e "  ${YELLOW}11)${NC} Renew Panel Certificate"
         echo -e "  ${YELLOW}12)${NC} Setup New Panel Certificate"
+        echo -e "  ${YELLOW}13)${NC} Add Panel Port"
+        echo -e "  ${YELLOW}14)${NC} Remove Panel Port"
+        echo -e "  ${YELLOW}15)${NC} Reset Panel to Defaults"
         echo ""
         echo -e "  ${WHITE}── Node ──${NC}"
         echo -e "  ${BLUE}20)${NC} Install Node"
@@ -1923,6 +2367,9 @@ main_menu() {
         echo -e "  ${BLUE}25)${NC} Node Status"
         echo -e "  ${BLUE}26)${NC} Node Logs"
         echo -e "  ${BLUE}27)${NC} Renew Node Certificate"
+        echo -e "  ${BLUE}28)${NC} Add Node Port"
+        echo -e "  ${BLUE}29)${NC} Remove Node Port"
+        echo -e "  ${BLUE}30)${NC} Reset Node"
         echo ""
         echo -e "  ${RED}99)${NC} Uninstall Panel"
         echo -e "  ${WHITE}0)${NC}  Exit"
@@ -1949,6 +2396,9 @@ main_menu() {
             10) change_db_password ;;
             11) renew_certificate ;;
             12) setup_new_certificate ;;
+            13) add_panel_port ;;
+            14) remove_panel_port ;;
+            15) reset_panel ;;
             
             # Node options
             20) install_node_wizard ;;
@@ -1966,6 +2416,9 @@ main_menu() {
                 docker compose logs -f
                 ;;
             27) renew_node_certificate ;;
+            28) add_node_port ;;
+            29) remove_node_port ;;
+            30) reset_node ;;
             
             # Other
             99) uninstall ;;
