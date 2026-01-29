@@ -34,7 +34,7 @@ Or clone and run / Или клонируйте и запустите:
 ```bash
 git clone https://github.com/konstpic/3x-ui-new.git
 cd 3x-ui-new
-sudo bash install.sh
+sudo ./install.sh
 ```
 
 ---
@@ -72,14 +72,14 @@ The install script supports multiple Linux distributions and automatically:
 #### Panel Installation / Установка панели
 
 ```bash
-sudo bash install.sh
+sudo ./install.sh
 # Select: 1) Install Panel
 ```
 
 #### Node Installation / Установка узла
 
 ```bash
-sudo bash install.sh
+sudo ./install.sh
 # Select: 2) Install Node
 ```
 
@@ -90,7 +90,7 @@ After installation, run the script again to access the management menu:
 После установки запустите скрипт снова для доступа к меню управления:
 
 ```bash
-sudo bash install.sh
+sudo ./install.sh
 ```
 
 **Menu options / Опции меню:**
