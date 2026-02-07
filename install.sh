@@ -2247,6 +2247,18 @@ curl -x socks5h://127.0.0.1:4000 https://www.cloudflare.com/cdn-cgi/trace
     echo -e "\e[0m"
 }
 
+# WARP uninstall
+warp_uninstall() {
+    systemctl daemon-reload
+    systemctl disable gost.service
+    systemctl stop gost.service
+    rm /usr/bin/gost
+    warp-cli registration delete
+    warp-cli disconnect
+    apt purge cloudflare-warp -y
+    apt autoremove -y
+}
+
 # Save configuration
 save_config() {
     local panel_port="$1"
@@ -4033,6 +4045,7 @@ main_menu() {
         echo ""
         echo -e "  ${WHITE}── Additionally ──${NC}"
         echo -e "  ${CYAN}50)${NC} WARP install"
+        echo -e "  ${RED}98)${NC} Uninstall WARP"
         echo -e "  ${RED}99)${NC} Uninstall Panel"
         echo -e "  ${WHITE}0)${NC}  Exit"
         echo ""
@@ -4112,6 +4125,7 @@ main_menu() {
             
             # Other
             50) warp_install ;;
+            98) warp_uninstall ;;
             99) uninstall ;;
             0) 
                 echo -e "${GREEN}Goodbye!${NC}"

@@ -2164,7 +2164,7 @@ remove_node_port() {
 # ============================================
 # END NODE FUNCTIONS
 # ============================================
-# Warp install
+# WARP install
 warp_install() {
     echo -e "\e[38;2;0;255;255m--- 1. Установка Cloudflare WARP ---\e[0m"
 curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
@@ -2246,6 +2246,17 @@ curl -x socks5h://127.0.0.1:4000 https://www.cloudflare.com/cdn-cgi/trace
     echo "	127.0.0.1:4000"
     echo "-----------------------------------------------------------------"
     echo -e "\e[0m"
+}
+# WARP uninstall
+warp_uninstall() {
+    systemctl daemon-reload
+    systemctl disable gost.service
+    systemctl stop gost.service
+    rm /usr/bin/gost
+    warp-cli registration delete
+    warp-cli disconnect
+    apt purge cloudflare-warp -y
+    apt autoremove -y
 }
 
 # Save configuration
@@ -4034,7 +4045,8 @@ main_menu() {
         echo -e "  ${LIME}40)${NC} Сбросить узел"
         echo ""
         echo -e "  ${WHITE}── Дополнительно ──${NC}"
-        echo -e "  ${CYAN}50)${NC} Установка WARP"
+        echo -e "  ${CYAN}50)${NC} Установить WARP"
+        echo -e "  ${RED}98)${NC} Удалить WARP"
         echo -e "  ${RED}99)${NC} Удалить панель"
         echo -e "  ${WHITE}0)${NC}  Выход"
         echo ""
@@ -4114,6 +4126,7 @@ main_menu() {
             
             # Other
             50) warp_install ;;
+            98) warp_uninstall ;;
             99) uninstall ;;
             0) 
                 echo -e "${GREEN}До свидания!${NC}"
